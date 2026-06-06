@@ -37,6 +37,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HT3301601278/Server-Tools/re
 
 ## 功能
 
+主菜单输入数字进入功能。进入用户列表后，使用 `↑/↓` 移动，空格勾选/取消，回车执行，`q` 取消。
+
 ```text
 1. 查看普通用户
 2. 查看用户详情
@@ -64,10 +66,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HT3301601278/Server-Tools/re
 userdel -r 用户名
 ```
 
-删除前需要输入：
+删除前需要先用空格勾选用户，回车进入确认，再输入：
 
 ```text
-DELETE 用户名
+DELETE
 ```
 
 脚本会拒绝删除 `root` 和 UID 小于 1000 的系统用户。

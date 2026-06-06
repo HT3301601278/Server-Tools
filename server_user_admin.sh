@@ -42,7 +42,6 @@ detect_supported_os() {
     die "无法读取 /etc/os-release。本脚本仅支持 Ubuntu 和 CentOS"
   fi
 
-  # shellcheck disable=SC1091
   . /etc/os-release
 
   OS_ID="${ID:-}"
@@ -69,8 +68,7 @@ detect_supported_os() {
 }
 
 validate_username() {
-  # Conservative Linux username rule for this admin script.
-  printf '%s' "$1" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'
+  printf '%s' "$1" | grep -Eq '^[A-Za-z_][A-Za-z0-9_-]{0,31}$'
 }
 
 user_exists() {
@@ -112,6 +110,149 @@ is_user_in_group() {
   id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"
 }
 
+clear_screen() {
+  printf '\033[2J\033[H' >&2
+}
+
+select_menu() {
+  local title="$1"
+  shift
+
+  local -a options=("$@")
+  local selected=0
+  local count="${#options[@]}"
+  local key
+  local rest
+  local i
+
+  if [ "$count" -eq 0 ]; then
+    warn "没有可选择的项目"
+    return 1
+  fi
+
+  while true; do
+    clear_screen
+    printf '%s\n' "$title" >&2
+    printf '使用 ↑/↓ 选择，回车确认，q 取消\n\n' >&2
+
+    for i in "${!options[@]}"; do
+      if [ "$i" -eq "$selected" ]; then
+        printf '\033[7m> %s\033[0m\n' "${options[$i]}" >&2
+      else
+        printf '  %s\n' "${options[$i]}" >&2
+      fi
+    done
+
+    IFS= read -rsn1 key
+
+    case "$key" in
+      $'\x1b')
+        IFS= read -rsn2 -t 0.1 rest || true
+        case "$rest" in
+          "[A") selected=$(( (selected + count - 1) % count )) ;;
+          "[B") selected=$(( (selected + 1) % count )) ;;
+          *) return 1 ;;
+        esac
+        ;;
+      "")
+        printf '%s\n' "$selected"
+        return 0
+        ;;
+      q|Q)
+        return 1
+        ;;
+    esac
+  done
+}
+
+select_checklist() {
+  local title="$1"
+  shift
+
+  local -a options=("$@")
+  local -a checked=()
+  local selected=0
+  local count="${#options[@]}"
+  local key
+  local rest
+  local i
+  local mark
+  local message=""
+  local has_checked
+
+  if [ "$count" -eq 0 ]; then
+    warn "没有可选择的项目"
+    return 1
+  fi
+
+  for i in "${!options[@]}"; do
+    checked[$i]=0
+  done
+
+  while true; do
+    clear_screen
+    printf '%s\n' "$title" >&2
+    printf '使用 ↑/↓ 移动，空格勾选/取消，回车执行，q 取消\n\n' >&2
+
+    if [ -n "$message" ]; then
+      printf '%s\n\n' "$message" >&2
+    fi
+
+    for i in "${!options[@]}"; do
+      if [ "${checked[$i]}" -eq 1 ]; then
+        mark="[x]"
+      else
+        mark="[ ]"
+      fi
+
+      if [ "$i" -eq "$selected" ]; then
+        printf '\033[7m> %s %s\033[0m\n' "$mark" "${options[$i]}" >&2
+      else
+        printf '  %s %s\n' "$mark" "${options[$i]}" >&2
+      fi
+    done
+
+    IFS= read -rsn1 key
+
+    case "$key" in
+      $'\x1b')
+        IFS= read -rsn2 -t 0.1 rest || true
+        case "$rest" in
+          "[A") selected=$(( (selected + count - 1) % count )) ;;
+          "[B") selected=$(( (selected + 1) % count )) ;;
+          *) return 1 ;;
+        esac
+        ;;
+      " ")
+        if [ "${checked[$selected]}" -eq 1 ]; then
+          checked[$selected]=0
+        else
+          checked[$selected]=1
+        fi
+        message=""
+        ;;
+      "")
+        has_checked=0
+        for i in "${!checked[@]}"; do
+          if [ "${checked[$i]}" -eq 1 ]; then
+            has_checked=1
+            printf '%s\n' "$i"
+          fi
+        done
+
+        if [ "$has_checked" -eq 1 ]; then
+          return 0
+        fi
+
+        message="请先按空格勾选至少一项"
+        ;;
+      q|Q)
+        return 1
+        ;;
+    esac
+  done
+}
+
 sudoers_file_for_user() {
   printf '%s/%s%s\n' "$SUDOERS_DIR" "$MANAGED_SUDOERS_PREFIX" "$1"
 }
@@ -131,6 +272,31 @@ check_sudoers() {
 print_user_table_header() {
   printf '%-20s %-8s %-12s %-8s %-10s %s\n' "用户名" "UID" "SUDO组" "SUDO" "免密SUDO" "Shell"
   printf '%-20s %-8s %-12s %-8s %-10s %s\n' "----" "---" "----------" "----" "--------" "-----"
+}
+
+regular_user_names() {
+  while IFS=: read -r name _ uid _ _ _ _; do
+    if [ "$uid" -ge 1000 ] && [ "$uid" -ne 65534 ] && [ "$name" != "nobody" ]; then
+      printf '%s\n' "$name"
+    fi
+  done < /etc/passwd
+}
+
+user_menu_label() {
+  local user="$1"
+  local in_sudo="no"
+  local nopasswd="no"
+
+  if is_user_in_group "$user" "$SUDO_GROUP"; then
+    in_sudo="yes"
+  fi
+
+  if has_nopasswd_rule "$user"; then
+    nopasswd="yes"
+  fi
+
+  printf '%s  UID=%s  sudo=%s  免密=%s  shell=%s' \
+    "$user" "$(user_uid "$user")" "$in_sudo" "$nopasswd" "$(user_shell "$user")"
 }
 
 list_regular_users() {
@@ -172,7 +338,7 @@ read_username() {
 show_user_detail() {
   local user
 
-  user="$(read_username "用户名：")" || return 1
+  user="$(choose_existing_user)" || return 1
 
   if ! user_exists "$user"; then
     warn "用户不存在：$user"
@@ -232,93 +398,156 @@ confirm() {
 }
 
 choose_existing_user() {
+  local -a users=()
+  local -a labels=()
   local user
+  local selected
 
-  list_regular_users >&2
-  printf '\n' >&2
+  mapfile -t users < <(regular_user_names)
 
-  user="$(read_username "选择用户名：")" || return 1
-
-  if ! user_exists "$user"; then
-    warn "用户不存在：$user"
+  if [ "${#users[@]}" -eq 0 ]; then
+    warn "没有可选择的普通用户"
     return 1
   fi
+
+  for user in "${users[@]}"; do
+    labels+=("$(user_menu_label "$user")")
+  done
+
+  selected="$(select_menu "选择用户" "${labels[@]}")" || return 1
+  clear_screen
+  user="${users[$selected]}"
 
   printf '%s\n' "$user"
 }
 
-add_user_to_sudo() {
-  local user="${1:-}"
+choose_existing_users() {
+  local title="${1:-选择用户}"
+  local -a users=()
+  local -a labels=()
+  local -a selected_indexes=()
+  local user
+  local selected_output
+  local index
 
-  if [ -z "$user" ]; then
-    user="$(choose_existing_user)" || return 1
+  mapfile -t users < <(regular_user_names)
+
+  if [ "${#users[@]}" -eq 0 ]; then
+    warn "没有可选择的普通用户"
+    return 1
   fi
 
-  usermod -aG "$SUDO_GROUP" "$user" || return 1
-  info "已把 $user 加入 $SUDO_GROUP"
+  for user in "${users[@]}"; do
+    labels+=("$(user_menu_label "$user")")
+  done
+
+  selected_output="$(select_checklist "$title" "${labels[@]}")" || return 1
+  mapfile -t selected_indexes <<< "$selected_output"
+  clear_screen
+
+  for index in "${selected_indexes[@]}"; do
+    printf '%s\n' "${users[$index]}"
+  done
+}
+
+add_user_to_sudo() {
+  local user="${1:-}"
+  local -a users=()
+  local selected_output
+
+  if [ -n "$user" ]; then
+    users=("$user")
+  else
+    selected_output="$(choose_existing_users "选择要加入 $SUDO_GROUP 组的用户")" || return 1
+    mapfile -t users <<< "$selected_output"
+  fi
+
+  for user in "${users[@]}"; do
+    usermod -aG "$SUDO_GROUP" "$user" || return 1
+    info "已把 $user 加入 $SUDO_GROUP"
+  done
 }
 
 remove_user_from_sudo() {
+  local -a users=()
+  local selected_output
   local user
 
-  user="$(choose_existing_user)" || return 1
+  selected_output="$(choose_existing_users "选择要移出 $SUDO_GROUP 组的用户")" || return 1
+  mapfile -t users <<< "$selected_output"
 
-  if ! is_user_in_group "$user" "$SUDO_GROUP"; then
-    warn "$user 不在 $SUDO_GROUP 组中"
-    return 0
-  fi
+  for user in "${users[@]}"; do
+    if ! is_user_in_group "$user" "$SUDO_GROUP"; then
+      warn "$user 不在 $SUDO_GROUP 组中"
+      continue
+    fi
 
-  gpasswd -d "$user" "$SUDO_GROUP" || return 1
-  info "已把 $user 从 $SUDO_GROUP 移出"
+    gpasswd -d "$user" "$SUDO_GROUP" || return 1
+    info "已把 $user 从 $SUDO_GROUP 移出"
+  done
 }
 
 enable_nopasswd_sudo() {
   local user="${1:-}"
+  local -a users=()
+  local selected_output
   local file
   local tmp
 
   require_command visudo
 
-  if [ -z "$user" ]; then
-    user="$(choose_existing_user)" || return 1
+  if [ -n "$user" ]; then
+    users=("$user")
+  else
+    selected_output="$(choose_existing_users "选择要开启免密 sudo 的用户")" || return 1
+    mapfile -t users <<< "$selected_output"
   fi
 
-  file="$(sudoers_file_for_user "$user")"
-  tmp="$(mktemp)"
+  for user in "${users[@]}"; do
+    file="$(sudoers_file_for_user "$user")"
+    tmp="$(mktemp)"
 
-  printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "$tmp"
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "$tmp"
 
-  if ! visudo -cf "$tmp"; then
+    if ! visudo -cf "$tmp"; then
+      rm -f "$tmp"
+      warn "sudoers 语法检查失败"
+      return 1
+    fi
+
+    install -m 0440 -o root -g root "$tmp" "$file"
     rm -f "$tmp"
-    warn "sudoers 语法检查失败"
-    return 1
-  fi
-
-  install -m 0440 -o root -g root "$tmp" "$file"
-  rm -f "$tmp"
+    info "已开启免密 sudo：$file"
+  done
 
   check_sudoers || return 1
-  info "已开启免密 sudo：$file"
 }
 
 disable_nopasswd_sudo() {
+  local -a users=()
+  local selected_output
   local user
   local file
 
-  user="$(choose_existing_user)" || return 1
-  file="$(sudoers_file_for_user "$user")"
+  selected_output="$(choose_existing_users "选择要关闭免密 sudo 的用户")" || return 1
+  mapfile -t users <<< "$selected_output"
 
-  if [ -f "$file" ]; then
-    rm -f "$file"
-    check_sudoers || return 1
-    info "已移除本脚本管理的免密 sudo 文件：$file"
-  else
-    warn "未找到本脚本管理的 sudoers 文件：$file"
-  fi
+  for user in "${users[@]}"; do
+    file="$(sudoers_file_for_user "$user")"
 
-  if has_nopasswd_rule "$user"; then
-    warn "$user 仍然存在其他 NOPASSWD 规则，不在本脚本管理文件中"
-  fi
+    if [ -f "$file" ]; then
+      rm -f "$file"
+      info "已移除本脚本管理的免密 sudo 文件：$file"
+    else
+      warn "未找到本脚本管理的 sudoers 文件：$file"
+    fi
+
+    if has_nopasswd_rule "$user"; then
+      warn "$user 仍然存在其他 NOPASSWD 规则，不在本脚本管理文件中"
+    fi
+  done
+
+  check_sudoers || return 1
 }
 
 add_ssh_key() {
@@ -369,55 +598,66 @@ add_ssh_key_for_user() {
 }
 
 delete_user() {
+  local -a users=()
+  local selected_output
   local user
   local uid
-  local expected
   local typed
+  local failed=0
 
-  user="$(choose_existing_user)" || return 1
-  uid="$(user_uid "$user")"
+  selected_output="$(choose_existing_users "选择要删除的用户")" || return 1
+  mapfile -t users <<< "$selected_output"
 
-  if [ "$user" = "root" ]; then
-    warn "拒绝删除 root"
-    return 1
-  fi
+  printf '\n即将删除以下用户：\n'
 
-  if [ "$uid" -lt 1000 ] || [ "$uid" -eq 65534 ]; then
-    warn "拒绝删除系统用户：$user uid=$uid"
-    return 1
-  fi
+  for user in "${users[@]}"; do
+    uid="$(user_uid "$user")"
 
-  printf '\n即将删除用户：\n'
-  printf '  用户：   %s\n' "$user"
-  printf '  UID：    %s\n' "$uid"
-  printf '  家目录： %s\n' "$(user_home "$user")"
-  printf '  ID：     %s\n' "$(id "$user")"
-
-  if who | awk '{print $1}' | grep -qx "$user"; then
-    warn "$user 当前可能已登录"
-  fi
-
-  if pgrep -u "$user" >/dev/null 2>&1; then
-    warn "$user 仍有运行中进程"
-    if ! confirm "仍然继续？"; then
+    if [ "$user" = "root" ]; then
+      warn "拒绝删除 root"
       return 1
     fi
+
+    if [ "$uid" -lt 1000 ] || [ "$uid" -eq 65534 ]; then
+      warn "拒绝删除系统用户：$user uid=$uid"
+      return 1
+    fi
+
+    printf '  - %s  UID=%s  家目录=%s\n' "$user" "$uid" "$(user_home "$user")"
+
+    if who | awk '{print $1}' | grep -qx "$user"; then
+      warn "$user 当前可能已登录"
+    fi
+
+    if pgrep -u "$user" >/dev/null 2>&1; then
+      warn "$user 仍有运行中进程"
+    fi
+  done
+
+  if ! confirm "确认继续删除以上用户？"; then
+    return 1
   fi
 
-  expected="DELETE $user"
-  printf '请输入 "%s" 确认删除：' "$expected"
+  printf '请输入 "DELETE" 确认删除：'
   read -r typed
 
-  if [ "$typed" != "$expected" ]; then
+  if [ "$typed" != "DELETE" ]; then
     warn "删除已取消"
     return 1
   fi
 
-  userdel -r "$user" || return 1
-  rm -f "$(sudoers_file_for_user "$user")"
-  check_sudoers || return 1
+  for user in "${users[@]}"; do
+    if userdel -r "$user"; then
+      rm -f "$(sudoers_file_for_user "$user")"
+      info "已删除用户：$user"
+    else
+      warn "删除失败：$user"
+      failed=1
+    fi
+  done
 
-  info "已删除用户：$user"
+  check_sudoers || return 1
+  return "$failed"
 }
 
 show_menu() {
@@ -450,6 +690,7 @@ main() {
     show_menu
     printf '请选择：'
     read -r choice
+    clear_screen
 
     case "$choice" in
       1) list_regular_users; pause ;;
