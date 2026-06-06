@@ -66,10 +66,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HT3301601278/Server-Tools/re
 userdel -r 用户名
 ```
 
-删除前需要先用空格勾选用户，回车进入确认，再输入：
-
-```text
-DELETE
-```
+删除前需要先用空格勾选用户，回车后输入 `y` 确认。
 
 脚本会拒绝删除 `root` 和 UID 小于 1000 的系统用户。

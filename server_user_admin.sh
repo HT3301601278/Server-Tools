@@ -5,7 +5,6 @@ set -o pipefail
 
 SUDOERS_DIR="/etc/sudoers.d"
 MANAGED_SUDOERS_PREFIX="90-user-"
-OS_ID=""
 OS_NAME=""
 SUDO_GROUP=""
 
@@ -38,16 +37,18 @@ require_command() {
 }
 
 detect_supported_os() {
+  local os_id
+
   if [ ! -r /etc/os-release ]; then
     die "无法读取 /etc/os-release。本脚本仅支持 Ubuntu 和 CentOS"
   fi
 
   . /etc/os-release
 
-  OS_ID="${ID:-}"
-  OS_NAME="${PRETTY_NAME:-$OS_ID}"
+  os_id="${ID:-}"
+  OS_NAME="${PRETTY_NAME:-$os_id}"
 
-  case "$OS_ID" in
+  case "$os_id" in
     ubuntu)
       SUDO_GROUP="sudo"
       ;;
@@ -89,18 +90,6 @@ user_shell() {
 
 primary_group() {
   id -gn "$1" 2>/dev/null || true
-}
-
-is_regular_user() {
-  local user="$1"
-  local uid
-
-  uid="$(user_uid "$user")"
-  [ -n "$uid" ] || return 1
-  [ "$user" != "root" ] || return 1
-  [ "$user" != "nobody" ] || return 1
-  [ "$uid" -ge 1000 ] || return 1
-  [ "$uid" -ne 65534 ] || return 1
 }
 
 is_user_in_group() {
@@ -300,24 +289,30 @@ user_menu_label() {
 }
 
 list_regular_users() {
+  local name
+  local uid
+  local shell
+  local in_sudo
+  local nopasswd
+
   print_user_table_header
 
-  while IFS=: read -r name _ uid _ _ _ shell; do
-    if [ "$uid" -ge 1000 ] && [ "$uid" -ne 65534 ] && [ "$name" != "nobody" ]; then
-      local in_sudo="no"
-      local nopasswd="no"
+  while read -r name; do
+    uid="$(user_uid "$name")"
+    shell="$(user_shell "$name")"
+    in_sudo="no"
+    nopasswd="no"
 
-      if is_user_in_group "$name" "$SUDO_GROUP"; then
-        in_sudo="yes"
-      fi
-
-      if has_nopasswd_rule "$name"; then
-        nopasswd="yes"
-      fi
-
-      printf '%-20s %-8s %-12s %-8s %-10s %s\n' "$name" "$uid" "$SUDO_GROUP" "$in_sudo" "$nopasswd" "$shell"
+    if is_user_in_group "$name" "$SUDO_GROUP"; then
+      in_sudo="yes"
     fi
-  done < /etc/passwd
+
+    if has_nopasswd_rule "$name"; then
+      nopasswd="yes"
+    fi
+
+    printf '%-20s %-8s %-12s %-8s %-10s %s\n' "$name" "$uid" "$SUDO_GROUP" "$in_sudo" "$nopasswd" "$shell"
+  done < <(regular_user_names)
 }
 
 read_username() {
@@ -351,7 +346,7 @@ show_user_detail() {
   printf '家目录：      %s\n' "$(user_home "$user")"
   printf 'Shell：       %s\n' "$(user_shell "$user")"
   printf '\n匹配到的 sudoers 规则：\n'
-  grep -R --line-number -e "$user" -e NOPASSWD /etc/sudoers "$SUDOERS_DIR" 2>/dev/null || true
+  grep -R --line-number -e "$user" /etc/sudoers "$SUDOERS_DIR" 2>/dev/null || true
 }
 
 add_user() {
@@ -602,7 +597,6 @@ delete_user() {
   local selected_output
   local user
   local uid
-  local typed
   local failed=0
 
   selected_output="$(choose_existing_users "选择要删除的用户")" || return 1
@@ -635,14 +629,6 @@ delete_user() {
   done
 
   if ! confirm "确认继续删除以上用户？"; then
-    return 1
-  fi
-
-  printf '请输入 "DELETE" 确认删除：'
-  read -r typed
-
-  if [ "$typed" != "DELETE" ]; then
-    warn "删除已取消"
     return 1
   fi
 
